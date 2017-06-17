@@ -1,0 +1,91 @@
+#!/bin/bash
+#
+# chkconfig:   2345 80 30
+# description: proxyt transparently proxies external connections through
+#              a proxy server supporting CONNECT
+# processname: proxyt
+# config:      /etc/sysconfig/proxyt
+# pidfile:     /var/run/proxyt.pid
+
+. /etc/sysconfig/proxyt
+
+# Source function library.
+. /etc/init.d/functions
+
+exec=/usr/sbin/proxyt
+prog=${exec##*/}
+lockfile=/var/lock/subsys/$prog
+pidfile=/var/run/proxyt.pid
+
+start_tables () {
+    local addr net
+    while iptables -t nat -D OUTPUT -j proxyt; do :; done 2>/dev/null
+    while iptables -t nat -D PREROUTING -j proxyt; do :; done 2>/dev/null
+
+    iptables -t nat -N proxyt 2>/dev/null || :
+    iptables -t nat -F proxyt
+    # Drop attempts to connect directly to the proxy on this host
+    for addr in $(ip addr | sed -n 's/^ *inet \([0-9.]*\).*/\1/p'); do
+	iptables -t nat -A proxyt -m tcp -p tcp -d $addr/32 --dport $PROXYT_LISTEN -j DROP
+    done
+    iptables -t nat -A proxyt -m tcp -p tcp -d $PROXYT_HOST/32 -j RETURN
+    for net in $PROXYT_DIRECT; do
+	iptables -t nat -A proxyt -m tcp -p tcp -d $net -j RETURN
+     done
+    iptables -t nat -A proxyt -m tcp -p tcp ! --dport $PROXYT_LISTEN -j REDIRECT --to-port $PROXYT_LISTEN
+
+    iptables -t nat -I OUTPUT -j proxyt
+    iptables -t nat -I PREROUTING -j proxyt
+}
+
+stop_tables () {
+    while iptables -t nat -D OUTPUT -j proxyt; do :; done 2>/dev/null
+    while iptables -t nat -D PREROUTING -j proxyt; do :; done 2>/dev/null
+    iptables -t nat -F proxyt
+    iptables -t nat -X proxyt
+}
+
+
+start () {
+    local net
+    echo -n $"Starting transparent proxy ($prog): "
+    start_tables
+    daemon $exec --pidfile $pidfile --port $PROXYT_LISTEN $PROXYT_OPTIONS $PROXYT_HOST $PROXYT_PORT
+    retval=$?
+    echo
+    [ $retval -eq 0 ] && touch $lockfile
+    return $retval
+}
+
+stop () {
+    echo -n $"Stopping transparent proxy ($prog): "
+    stop_tables
+    killproc $prog
+    retval=$?
+    echo
+    [ $retval -eq 0 ] && rm -f $lockfile
+    return $retval
+}
+
+restart () {
+    stop
+    start
+}
+
+case "$1" in
+    start|stop|restart)
+	$1
+	;;
+    reload)
+	start_tables
+	;;
+    condrestart)
+	[ -f $lockfile ] && restart
+	;;
+    status)
+	status $prog
+	;;
+    *)
+	echo $"usage: $0 {start|stop|restart|condrestart|status}"
+	exit 2
+esac
